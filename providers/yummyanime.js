@@ -12,7 +12,7 @@ var CONCURRENCY = 5;    // сколько запросов к плеерам о�
 // порядок озвучек в списке: эти идут первыми, остальные — после них (это НЕ фильтр)
 var DUB_PRIORITY = ['anilibria', 'anidub', 'studioband', 'dream cast', 'anistar', 'animevost', 'jam', 'shiza', 'crunchyroll', 'субтитры'];
 
-var DEBUG = true; // true — показывать лог строками DEBUG в списке стримов (для поиска ошибок)
+var DEBUG = false; // true — показывать лог строками DEBUG в списке стримов (для поиска ошибок)
 var LOGS = [];
 function log(msg) {
   LOGS.push(String(msg));
@@ -512,7 +512,7 @@ function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
   var episode = mediaType === 'tv' ? (parseInt(episodeNum, 10) || 1) : 1;
   var info;
   LOGS = [];
-  log('v1.3.1 tmdb=' + tmdbId + ' ' + mediaType + ' S' + season + 'E' + episode);
+  log('v1.3.2 tmdb=' + tmdbId + ' ' + mediaType + ' S' + season + 'E' + episode);
   return getTmdbInfo(tmdbId, mediaType, season).then(function (i) {
     info = i;
     log('TMDB: ' + info.titles.join(' / ') + ' (' + info.year + '), сезон ' + season + ' (' + info.seasonYear + ')');
