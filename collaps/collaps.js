@@ -7,7 +7,7 @@
 // Только Promise-цепочки, без async/await (требование Nuvio).
 
 var TMDB_API_KEY = '439c478a771f35c05022f9feabcca01c';
-var DOMAINS = ['https://api.embf.net']; // если Collaps переедет — добавить новый домен сюда
+var DOMAINS = ['https://api.embf.net', 'https://api.nextembed.ws']; // по очереди; если Collaps переедет — добавить новый домен сюда
 var UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 var SHOW_DASH = true;  // DASH (.mpd): до 1080p
