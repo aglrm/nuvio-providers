@@ -1,41 +1,34 @@
-// HDRezka scraper for Nuvio
-// - домен rezka.ag (+ запасные зеркала)
-// - поиск по русскому и оригинальному названию из TMDB
-// - расшифровка ссылок формата "#h..." (trash-base64)
-// - русская озвучка по умолчанию + "Оригинал + субтитры", если есть
+// YummyAnime (old.yummyani.me) scraper for Nuvio
+// - поиск через API сайта: /api/search, серии: /api/anime/{id}/videos
+// - видео берётся из плеера Kodik (у него больше всего озвучек), ссылки расшифровываются
+// - сезон TMDB сопоставляется с отдельной записью на сайте по году выхода сезона
 // Только Promise-цепочки, без async/await (требование Nuvio).
 
 var TMDB_API_KEY = '439c478a771f35c05022f9feabcca01c';
-var DOMAINS = ['https://rezka.ag', 'https://hdrezka.ag', 'https://hdrezka.me'];
+var SITE = 'https://old.yummyani.me';
 var UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-var MAX_TRANSLATORS = 3;
+var MAX_DUBS = 40;      // по сути все озвучки серии
+var CONCURRENCY = 5;    // сколько запросов к плеерам одновременно
+// порядок озвучек в списке: эти идут первыми, остальные — после них (это НЕ фильтр)
+var DUB_PRIORITY = ['anilibria', 'anidub', 'studioband', 'dream cast', 'anistar', 'animevost', 'jam', 'shiza', 'crunchyroll', 'субтитры'];
 
+var DEBUG = true; // ОТЛАДКА: показывает лог строками в списке стримов
+var LOGS = [];
 function log(msg) {
-  try { console.log('[HDRezka] ' + msg); } catch (e) {}
+  LOGS.push(String(msg));
+  try { console.log('[YummyAnime] ' + msg); } catch (e) {}
 }
 
-function assign(a, b) {
-  var o = {}, k;
-  for (k in a) if (Object.prototype.hasOwnProperty.call(a, k)) o[k] = a[k];
-  for (k in b) if (Object.prototype.hasOwnProperty.call(b, k)) o[k] = b[k];
-  return o;
-}
-
-function pageHeaders(base) {
-  return {
-    'User-Agent': UA,
-    'Referer': base + '/',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8'
-  };
-}
-
-function ajaxHeaders(base) {
-  return assign(pageHeaders(base), {
-    'Origin': base,
-    'Accept': 'application/json, text/javascript, */*; q=0.01',
-    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-    'X-Requested-With': 'XMLHttpRequest'
+function debugStreams() {
+  if (!DEBUG) return [];
+  return LOGS.map(function (line, i) {
+    return {
+      name: 'DEBUG ' + (i + 1) + ': ' + line.slice(0, 120),
+      title: line,
+      url: SITE + '/?debug=' + i,
+      quality: line.slice(0, 60),
+      provider: 'yummyanime'
+    };
   });
 }
 
@@ -47,97 +40,15 @@ function formBody(obj) {
   return parts.join('&');
 }
 
-// ---------- base64 (без atob/btoa, чтобы работало в любом RN-движке) ----------
-var B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-
-function b64encodeAscii(str) {
-  var out = '', i = 0;
-  while (i < str.length) {
-    var c1 = str.charCodeAt(i++);
-    var c2 = i < str.length ? str.charCodeAt(i++) : NaN;
-    var c3 = i < str.length ? str.charCodeAt(i++) : NaN;
-    var e1 = c1 >> 2;
-    var e2 = ((c1 & 3) << 4) | ((c2 | 0) >> 4);
-    var e3 = (((c2 | 0) & 15) << 2) | ((c3 | 0) >> 6);
-    var e4 = (c3 | 0) & 63;
-    out += B64.charAt(e1) + B64.charAt(e2) +
-      (isNaN(c2) ? '=' : B64.charAt(e3)) +
-      (isNaN(c3) ? '=' : B64.charAt(e4));
-  }
-  return out;
+function fetchJson(url, opts) {
+  return fetch(url, opts).then(function (r) {
+    return r.text().then(function (t) {
+      if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + url.slice(0, 50) + ' ' + t.replace(/\s+/g, ' ').slice(0, 60));
+      try { return JSON.parse(t); } catch (e) { throw new Error('не JSON ' + url.slice(0, 50) + ' ' + t.replace(/\s+/g, ' ').slice(0, 60)); }
+    });
+  });
 }
 
-function b64decodeUtf8(s) {
-  s = String(s).replace(/[^A-Za-z0-9+/]/g, '');
-  var bytes = [], buf = 0, bits = 0;
-  for (var i = 0; i < s.length; i++) {
-    buf = ((buf << 6) | B64.indexOf(s.charAt(i))) & 0xFFFFFF;
-    bits += 6;
-    if (bits >= 8) {
-      bits -= 8;
-      bytes.push((buf >> bits) & 0xFF);
-    }
-  }
-  var out = '', j = 0;
-  while (j < bytes.length) {
-    var b = bytes[j++];
-    if (b < 0x80) out += String.fromCharCode(b);
-    else if (b >= 0xC0 && b < 0xE0) out += String.fromCharCode(((b & 0x1F) << 6) | (bytes[j++] & 0x3F));
-    else if (b >= 0xE0 && b < 0xF0) out += String.fromCharCode(((b & 0x0F) << 12) | ((bytes[j++] & 0x3F) << 6) | (bytes[j++] & 0x3F));
-    else { j += 3; }
-  }
-  return out;
-}
-
-// ---------- расшифровка "#h..." ----------
-var TRASH_CODES = null;
-
-function getTrashCodes() {
-  if (TRASH_CODES) return TRASH_CODES;
-  var chars = ['@', '#', '!', '^', '$'];
-  var codes = [], a, b, c;
-  for (a = 0; a < chars.length; a++)
-    for (b = 0; b < chars.length; b++) {
-      codes.push(b64encodeAscii(chars[a] + chars[b]));
-      for (c = 0; c < chars.length; c++) codes.push(b64encodeAscii(chars[a] + chars[b] + chars[c]));
-    }
-  TRASH_CODES = codes;
-  return codes;
-}
-
-function decodeStreamString(data) {
-  if (!data || typeof data !== 'string') return '';
-  if (data.indexOf('#h') !== 0) return data; // уже в открытом виде
-  var s = data.slice(2).split('//_//').join('');
-  var codes = getTrashCodes();
-  for (var i = 0; i < codes.length; i++) s = s.split(codes[i]).join('');
-  return b64decodeUtf8(s);
-}
-
-// "[720p]https://a/720.mp4:hls:manifest.m3u8 or https://b/720.mp4,[1080p Ultra]..."
-function parseQualities(decoded) {
-  var result = [];
-  var re = /\[([^\]]+)\]([^\[]*)/g, m;
-  while ((m = re.exec(decoded)) !== null) {
-    var label = m[1].replace(/<[^>]+>/g, '').trim();
-    var links = m[2].replace(/,\s*$/, '').split(/\s+or\s+/);
-    var url = null, k;
-    for (k = 0; k < links.length; k++) {
-      var l = links[k].trim().replace(/,$/, '');
-      if (!/^https?:\/\//.test(l)) continue;
-      var mp4 = l.replace(/:hls:manifest\.m3u8$/, '');
-      if (/\.mp4$/.test(mp4)) { url = mp4; break; }
-      if (!url) url = l;
-    }
-    if (!url || url === 'null') continue;
-    if (/ultra/i.test(label)) continue; // премиум-качество: без аккаунта отдаётся заглушка
-    var h = parseInt(label, 10);
-    result.push({ label: label, height: isNaN(h) ? 0 : h, url: url });
-  }
-  return result;
-}
-
-// ---------- сеть ----------
 function fetchText(url, opts) {
   return fetch(url, opts).then(function (r) {
     if (!r.ok) throw new Error('HTTP ' + r.status + ' for ' + url);
@@ -145,270 +56,410 @@ function fetchText(url, opts) {
   });
 }
 
-var RESOLVED_BASE = null;
+// ---------- base64 без atob ----------
+var B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
-function resolveBase() {
-  if (RESOLVED_BASE) return Promise.resolve(RESOLVED_BASE);
-  var idx = 0;
-  function tryNext() {
-    if (idx >= DOMAINS.length) return Promise.reject(new Error('Ни одно зеркало HDRezka не ответило'));
-    var d = DOMAINS[idx++];
-    return fetch(d + '/', { headers: pageHeaders(d) }).then(function (r) {
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      var finalUrl = r.url || d;
-      var m = finalUrl.match(/^(https?:\/\/[^\/]+)/);
-      RESOLVED_BASE = m ? m[1] : d;
-      log('Зеркало: ' + RESOLVED_BASE);
-      return RESOLVED_BASE;
-    }).catch(function (e) {
-      log(d + ' недоступен: ' + e.message);
-      return tryNext();
-    });
+function b64decode(s) {
+  s = String(s).replace(/[^A-Za-z0-9+/]/g, '');
+  var out = '', buf = 0, bits = 0;
+  for (var i = 0; i < s.length; i++) {
+    buf = ((buf << 6) | B64.indexOf(s.charAt(i))) & 0xFFFFFF;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out += String.fromCharCode((buf >> bits) & 0xFF);
+    }
   }
-  return tryNext();
+  return out;
+}
+
+// Kodik: каждая буква сдвинута на +18 по кругу, потом base64
+function decodeKodikSrc(src) {
+  if (!src || src.indexOf('//') !== -1) return src;
+  var shifted = src.replace(/[a-zA-Z]/g, function (ch) {
+    var limit = ch <= 'Z' ? 90 : 122;
+    var c = ch.charCodeAt(0) + 18;
+    return String.fromCharCode(c <= limit ? c : c - 26);
+  });
+  return b64decode(shifted);
 }
 
 // ---------- TMDB ----------
-function getTmdbInfo(tmdbId, mediaType) {
+function getTmdbInfo(tmdbId, mediaType, season) {
   var type = mediaType === 'tv' ? 'tv' : 'movie';
   var base = 'https://api.themoviedb.org/3/' + type + '/' + tmdbId + '?api_key=' + TMDB_API_KEY;
   return Promise.all([
-    fetch(base + '&language=ru-RU').then(function (r) { return r.json(); }),
-    fetch(base + '&language=en-US').then(function (r) { return r.json(); }).catch(function () { return {}; })
+    fetchJson(base + '&language=ru-RU'),
+    fetchJson(base + '&language=en-US').catch(function () { return {}; })
   ]).then(function (res) {
     var ru = res[0] || {}, en = res[1] || {};
     var date = type === 'tv' ? ru.first_air_date : ru.release_date;
     var titles = [
       type === 'tv' ? ru.name : ru.title,
-      type === 'tv' ? ru.original_name : ru.original_title,
-      type === 'tv' ? en.name : en.title
+      type === 'tv' ? en.name : en.title,
+      type === 'tv' ? ru.original_name : ru.original_title
     ].filter(function (t, i, arr) { return t && arr.indexOf(t) === i; });
-    return { titles: titles, year: date ? parseInt(date.slice(0, 4), 10) : null };
+    var info = {
+      titles: titles,
+      year: date ? parseInt(date.slice(0, 4), 10) : null,
+      seasonYear: null,
+      seasonEpisodes: null,
+      prevEpisodes: 0
+    };
+    if (type === 'tv' && ru.seasons) {
+      ru.seasons.forEach(function (s) {
+        if (s.season_number === season) {
+          info.seasonYear = s.air_date ? parseInt(s.air_date.slice(0, 4), 10) : null;
+          info.seasonEpisodes = s.episode_count;
+        } else if (s.season_number > 0 && s.season_number < season) {
+          info.prevEpisodes += s.episode_count || 0;
+        }
+      });
+    }
+    return info;
   });
 }
 
-// ---------- поиск ----------
-function stripTags(s) {
-  return String(s || '').replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/&#039;|&apos;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, ' ').trim();
-}
-
+// ---------- поиск на сайте ----------
 function norm(s) {
   return String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/[^a-zа-я0-9]+/g, '');
 }
 
-function yearFrom(text, url) {
-  var m = String(text || '').match(/\b(19\d{2}|20\d{2})\b/);
-  if (m) return parseInt(m[1], 10);
-  m = String(url || '').match(/-(19\d{2}|20\d{2})(?:-latest)?\.html/);
-  return m ? parseInt(m[1], 10) : null;
+function siteSearch(query) {
+  var url = SITE + '/api/search?q=' + encodeURIComponent(query) + '&limit=20&offset=0';
+  return fetchJson(url, { headers: { 'User-Agent': UA, 'Accept': 'application/json', 'Referer': SITE + '/' } })
+    .then(function (j) { return j.response || []; })
+    .catch(function (e) { log('поиск "' + query + '": ' + e.message); return []; });
 }
 
-function searchAjax(base, query) {
-  return fetchText(base + '/engine/ajax/search.php', {
-    method: 'POST', headers: ajaxHeaders(base), body: formBody({ q: query })
-  }).then(function (html) {
-    var out = [], re = /<a\s+href="([^"]+)"[^>]*>\s*<span class="enty">([\s\S]*?)<\/span>([\s\S]*?)<\/a>/g, m;
-    while ((m = re.exec(html)) !== null) {
-      var rest = stripTags(m[3].replace(/<span class="rating">[\s\S]*?<\/span>/g, ''));
-      var alt = rest.replace(/^\(|\)$/g, '').split(',')[0];
-      out.push({ url: m[1], title: stripTags(m[2]), alt: alt, year: yearFrom(rest, m[1]) });
-    }
-    return out;
-  }).catch(function (e) { log('ajax-поиск: ' + e.message); return []; });
+function isMovieType(item) {
+  var alias = item.type && item.type.alias;
+  return alias === 'movie' || alias === 'film';
 }
 
-function searchPage(base, query) {
-  var url = base + '/search/?do=search&subaction=search&q=' + encodeURIComponent(query);
-  return fetchText(url, { headers: pageHeaders(base) }).then(function (html) {
-    var out = [], re = /<div class="b-content__inline_item-link">\s*<a href="([^"]+)">([\s\S]*?)<\/a>\s*<div>([\s\S]*?)<\/div>/g, m;
-    while ((m = re.exec(html)) !== null) {
-      out.push({ url: m[1], title: stripTags(m[2]), alt: '', year: yearFrom(m[3], m[1]) });
-    }
-    return out;
-  }).catch(function (e) { log('поиск-страница: ' + e.message); return []; });
-}
-
-function typeOk(url, mediaType) {
-  if (mediaType === 'tv') return !/\/films\//.test(url);
-  return !/\/series\//.test(url);
-}
-
-function pickBest(cands, info, mediaType) {
-  var wanted = info.titles.map(norm);
-  var best = null, bestScore = -1;
-  cands.forEach(function (c) {
-    if (!typeOk(c.url, mediaType)) return;
+// Возвращает список кандидатов, отсортированный от лучшего к худшему
+function rankCandidates(all, info, mediaType, season) {
+  var mainTitle = norm(info.titles[0]);
+  var targetYear = mediaType === 'tv' ? (info.seasonYear || info.year) : info.year;
+  var scored = [];
+  all.forEach(function (it) {
+    var movie = isMovieType(it);
+    if (mediaType === 'movie' && !movie) return;
+    if (mediaType === 'tv' && movie) return;
+    var t = norm(it.title);
     var score = 0;
-    var titleHit = wanted.indexOf(norm(c.title)) !== -1 || (c.alt && wanted.indexOf(norm(c.alt)) !== -1);
-    if (titleHit) score += 2;
-    if (info.year && c.year) {
-      var d = Math.abs(c.year - info.year);
-      if (d === 0) score += 3; else if (d === 1) score += 1; else return; // год сильно расходится — отбрасываем
+    if (t === mainTitle) score += 4;
+    else if (mainTitle && t.indexOf(mainTitle) === 0) score += 2;
+    if (targetYear && it.year) {
+      var d = Math.abs(it.year - targetYear);
+      if (d === 0) score += 4; else if (d === 1) score += 1; else score -= 3;
     }
-    if (score > bestScore) { bestScore = score; best = c; }
+    // для 2+ сезона на сайте обычно отдельная запись "Название 2" / "... 2 сезон"
+    if (mediaType === 'tv' && season > 1 && new RegExp('(^|[^0-9])' + season + '([^0-9]|$)').test(it.title)) score += 2;
+    if (mediaType === 'tv' && season === 1 && t === mainTitle) score += 1;
+    if (score > 0) scored.push({ item: it, score: score });
   });
-  return bestScore >= 2 ? best : null;
+  scored.sort(function (a, b) { return b.score - a.score; });
+  return scored.map(function (s) { return s.item; });
 }
 
-function findItem(base, info, mediaType) {
+function findCandidates(info, mediaType, season) {
   var all = [], seen = {};
-  function add(list) {
-    list.forEach(function (c) { if (!seen[c.url]) { seen[c.url] = 1; all.push(c); } });
-  }
-  var queries = info.titles.slice(0, 3);
-  var i = 0;
-  function next() {
-    if (i >= queries.length) {
-      // последний шанс — полноценная страница поиска по русскому названию
-      return searchPage(base, queries[0] || '').then(function (list) {
-        add(list);
-        return pickBest(all, info, mediaType);
+  var queries = info.titles.slice(0, 2);
+  return Promise.all(queries.map(siteSearch)).then(function (lists) {
+    lists.forEach(function (list) {
+      list.forEach(function (it) {
+        if (!seen[it.anime_id]) { seen[it.anime_id] = 1; all.push(it); }
+      });
+    });
+    return { all: all, ranked: rankCandidates(all, info, mediaType, season) };
+  });
+}
+
+// Все ТВ-части той же франшизы по порядку выхода: "Название", "Название 2", "Название: Финал"...
+function baseTitle(title) {
+  return norm(String(title || '').split(/[:|—–]|\s\d+(\s|$)/)[0]);
+}
+
+function franchiseChain(all, item) {
+  var base = baseTitle(item.title);
+  if (!base) return [item];
+  var chain = all.filter(function (it) {
+    var alias = it.type && it.type.alias;
+    if (alias !== 'tv' && alias !== 'ona') return false;
+    return norm(it.title).indexOf(base) === 0;
+  });
+  if (chain.indexOf(item) === -1) chain.push(item);
+  chain.sort(function (a, b) {
+    var ya = a.year || 9999, yb = b.year || 9999; // анонсы (год 0) — в конец
+    if (ya !== yb) return ya - yb;
+    return a.anime_id - b.anime_id;
+  });
+  return chain;
+}
+
+function maxEpisode(videos) {
+  var max = 0;
+  videos.forEach(function (v) {
+    var n = parseInt(v.number, 10);
+    if (!isNaN(n) && n > max) max = n;
+  });
+  return max;
+}
+
+// короткометражки (спешлы по 1-5 минут) при переносе серий пропускаем
+function isShorts(videos) {
+  var d = videos.map(function (v) { return v.duration || 0; }).filter(function (x) { return x > 0; }).slice(0, 10);
+  if (!d.length) return false;
+  var sum = 0;
+  d.forEach(function (x) { sum += x; });
+  return sum / d.length < 480;
+}
+
+// Ищет серию в записи; если номер больше, чем серий в записи, переходит к следующей части
+function walkChain(chain, idx, ep, isNextPart) {
+  if (idx < 0 || idx >= chain.length) return Promise.resolve(null);
+  var item = chain[idx];
+  return getVideos(item.anime_id).then(function (videos) {
+    log('videos id=' + item.anime_id + ': ' + videos.length);
+    if (isNextPart && isShorts(videos)) return walkChain(chain, idx + 1, ep, true);
+    var picked = pickEpisodeVideos(videos, ep);
+    if (picked.length) {
+      log('Найдено: ' + item.title + ' (' + item.year + ') id=' + item.anime_id + ', серия ' + ep);
+      return picked;
+    }
+    var max = maxEpisode(videos);
+    if (max > 0 && ep > max && idx + 1 < chain.length) {
+      return walkChain(chain, idx + 1, ep - max, true);
+    }
+    return null;
+  }).catch(function (e) {
+    log('videos: ' + e.message);
+    return null;
+  });
+}
+
+// ---------- серии и озвучки ----------
+function getVideos(animeId) {
+  return fetchJson(SITE + '/api/anime/' + animeId + '/videos', {
+    headers: { 'User-Agent': UA, 'Accept': 'application/json', 'Referer': SITE + '/' }
+  }).then(function (j) { return j.response || []; });
+}
+
+function isKodik(v) {
+  return /kodik/i.test(v.iframe_url || '') || /kodik/i.test((v.data && v.data.player) || '');
+}
+
+function dubRank(name) {
+  var n = String(name || '').toLowerCase();
+  for (var i = 0; i < DUB_PRIORITY.length; i++) if (n.indexOf(DUB_PRIORITY[i]) !== -1) return i;
+  return DUB_PRIORITY.length;
+}
+
+function isAksor(v) {
+  return /aksor\.tv\/video\//i.test(v.iframe_url || '');
+}
+
+function pickEpisodeVideos(videos, episodeNum) {
+  var ep = String(episodeNum);
+  var aksor = videos.filter(function (v) { return isAksor(v) && String(v.number) === ep; });
+  var kodik = pickKodikVideos(videos, ep);
+  return aksor.concat(kodik);
+}
+
+function pickKodikVideos(videos, ep) {
+  var list = videos.filter(function (v) { return isKodik(v) && String(v.number) === ep; });
+  var byDub = {};
+  list.forEach(function (v) {
+    var d = (v.data && v.data.dubbing) || 'Kodik';
+    if (!byDub[d]) byDub[d] = v;
+  });
+  var dubs = Object.keys(byDub);
+  dubs.sort(function (a, b) {
+    var ra = dubRank(a), rb = dubRank(b);
+    if (ra !== rb) return ra - rb;
+    return (byDub[b].views || 0) - (byDub[a].views || 0);
+  });
+  return dubs.slice(0, MAX_DUBS).map(function (d) { return byDub[d]; });
+}
+
+// ---------- Kodik ----------
+function kodikStreams(video) {
+  var iframe = video.iframe_url;
+  if (iframe.indexOf('//') === 0) iframe = 'https:' + iframe;
+  var host = (iframe.match(/^(https?:\/\/[^\/]+)/) || [])[1];
+  var dubName = String((video.data && video.data.dubbing) || 'Kodik').replace(/^Озвучка\s+/i, '');
+  return fetchText(iframe, {
+    headers: { 'User-Agent': UA, 'Referer': SITE + '/', 'Accept': 'text/html,*/*' }
+  }).then(function (html) {
+    var params = (html.match(/var\s+urlParams\s*=\s*'([^']+)'/) || [])[1];
+    var vType = (html.match(/vInfo\.type\s*=\s*'([^']+)'/) || [])[1];
+    var vHash = (html.match(/vInfo\.hash\s*=\s*'([^']+)'/) || [])[1];
+    var vId = (html.match(/vInfo\.id\s*=\s*'([^']+)'/) || [])[1];
+    if (!params || !vType || !vHash || !vId) throw new Error('не удалось разобрать плеер Kodik, len=' + html.length + ' ' + html.replace(/\s+/g, ' ').slice(0, 80));
+    var p = JSON.parse(params);
+    var ref = p.ref || '';
+    try { ref = decodeURIComponent(ref); } catch (e) {} // в urlParams ref уже закодирован; без декодирования Kodik отвечает 500
+    var body = {
+      d: p.d, d_sign: p.d_sign, pd: p.pd, pd_sign: p.pd_sign, ref: ref, ref_sign: p.ref_sign,
+      bad_user: 'false', cdn_is_working: 'true',
+      type: vType, hash: vHash, id: vId, info: '{}'
+    };
+    return fetchJson(host + '/ftor', {
+      method: 'POST',
+      headers: {
+        'User-Agent': UA,
+        'Referer': iframe,
+        'Origin': host,
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Accept': 'application/json, text/javascript, */*; q=0.01'
+      },
+      body: formBody(body)
+    });
+  }).then(function (j) {
+    // Одна ссылка на озвучку — в лучшем качестве (плейлист Kodik сам по себе одного качества)
+    var links = j.links || {};
+    var best = null, bestH = -1;
+    Object.keys(links).forEach(function (q) {
+      var arr = links[q] || [];
+      var h = parseInt(q, 10);
+      if (!arr.length || isNaN(h) || h <= bestH) return;
+      var url = decodeKodikSrc(arr[0].src);
+      if (!url) return;
+      if (url.indexOf('//') === 0) url = 'https:' + url;
+      best = url; bestH = h;
+    });
+    if (!best) { log(dubName + ': links пустые ' + JSON.stringify(j).slice(0, 80)); return []; }
+    log(dubName + ': OK ' + bestH + 'p');
+    return [{
+      name: 'YummyAnime · ' + dubName,
+      title: dubName + ' · ' + bestH + 'p',
+      url: best,
+      quality: bestH + 'p',
+      height: bestH,
+      provider: 'yummyanime',
+      headers: { 'User-Agent': UA, 'Referer': host + '/' }
+    }];
+  }).catch(function (e) {
+    log(dubName + ': ' + e.message);
+    return [];
+  });
+}
+
+// ---------- Aksor (до 1080p, формат DASH .mpd) ----------
+function aksorStreams(video) {
+  var id = (String(video.iframe_url).match(/aksor\.tv\/video\/([a-z0-9]+)/i) || [])[1];
+  var dubName = String((video.data && video.data.dubbing) || 'Aksor').replace(/^Озвучка\s+/i, '');
+  if (!id) return Promise.resolve([]);
+  return fetchJson('https://player.aksor.tv/api/video/' + id, {
+    headers: { 'User-Agent': UA, 'Accept': 'application/json', 'Referer': 'https://player.aksor.tv/video/' + id }
+  }).then(function (j) {
+    log('Aksor ' + dubName + ': ответ ' + JSON.stringify(j.qualities || j).slice(0, 80));
+    var q = j.qualities || {};
+    var order = [['q4k', 2160], ['q2k', 1440], ['q1080', 1080], ['q720', 720], ['q480', 480], ['q360', 360]];
+    for (var i = 0; i < order.length; i++) {
+      var url = q[order[i][0]];
+      if (url) {
+        return [{
+          name: 'YummyAnime · ' + dubName + ' (Aksor)',
+          title: dubName + ' · ' + order[i][1] + 'p · Aksor',
+          url: url,
+          quality: order[i][1] + 'p',
+          height: order[i][1],
+          provider: 'yummyanime',
+          headers: { 'User-Agent': UA, 'Referer': 'https://player.aksor.tv/' }
+        }];
+      }
+    }
+    return [];
+  }).catch(function (e) {
+    log('Aksor ' + dubName + ': ' + e.message);
+    return [];
+  });
+}
+
+// Выполняет fn для каждого элемента, не больше limit одновременно; порядок результатов сохраняется
+function mapLimit(items, limit, fn) {
+  return new Promise(function (resolve) {
+    var results = new Array(items.length), next = 0, done = 0;
+    if (!items.length) return resolve(results);
+    function run() {
+      if (next >= items.length) return;
+      var i = next++;
+      Promise.resolve().then(function () { return fn(items[i]); }).catch(function () { return []; }).then(function (r) {
+        results[i] = r || [];
+        done++;
+        if (done === items.length) resolve(results); else run();
       });
     }
-    var q = queries[i++];
-    return searchAjax(base, q).then(function (list) {
-      add(list);
-      var hit = pickBest(all, info, mediaType);
-      return hit || next();
-    });
-  }
-  return next();
-}
-
-// ---------- страница фильма/сериала ----------
-function attr(tag, name) {
-  var m = tag.match(new RegExp(name + '="([^"]*)"'));
-  return m ? m[1] : null;
-}
-
-function parseItemPage(html) {
-  var init = html.match(/initCDN(Movies|Series)Events\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+|false|true)/);
-  var idMatch = html.match(/data-post_id="(\d+)"/) || html.match(/name="post_id"[^>]*value="(\d+)"/);
-  var favs = (html.match(/id="ctrl_favs"[^>]*value="([^"]+)"/) || [])[1];
-  var page = {
-    id: init ? init[2] : (idMatch ? idMatch[1] : null),
-    isSeries: init ? init[1] === 'Series' : /initCDNSeriesEvents/.test(html),
-    defaultTranslator: init ? init[3] : null,
-    defaultCamrip: init && init[1] === 'Movies' ? init[4] : '0',
-    defaultAds: init && init[1] === 'Movies' ? init[5] : '0',
-    defaultDirector: init && init[1] === 'Movies' ? (init[6] === 'true' || init[6] === '1' ? '1' : '0') : '0',
-    favs: favs || null,
-    translators: []
-  };
-  var re = /<(li|a)\b([^>]*class="[^"]*b-translator__item[^"]*"[^>]*)>([\s\S]*?)<\/\1>/g, m;
-  while ((m = re.exec(html)) !== null) {
-    var tag = m[2];
-    var id = attr(tag, 'data-translator_id');
-    if (!id) continue;
-    var flag = (m[3].match(/<img[^>]*title="([^"]+)"/) || [])[1];
-    var name = attr(tag, 'title') || stripTags(m[3]);
-    if (flag && name.indexOf(flag) === -1) name += ' (' + flag + ')';
-    page.translators.push({
-      id: id, name: name,
-      camrip: attr(tag, 'data-camrip') || '0',
-      ads: attr(tag, 'data-ads') || '0',
-      director: attr(tag, 'data-director') || '0',
-      active: /\bactive\b/.test(attr(tag, 'class') || '')
-    });
-  }
-  if (!page.translators.length && page.defaultTranslator) {
-    page.translators.push({
-      id: page.defaultTranslator, name: 'Озвучка по умолчанию',
-      camrip: page.defaultCamrip, ads: page.defaultAds, director: page.defaultDirector, active: true
-    });
-  }
-  return page;
-}
-
-function chooseTranslators(page) {
-  var list = page.translators, chosen = [];
-  function push(t) { if (t && chosen.indexOf(t) === -1 && chosen.length < MAX_TRANSLATORS) chosen.push(t); }
-  var def = null, i;
-  for (i = 0; i < list.length; i++) if (list[i].id === page.defaultTranslator || list[i].active) { def = list[i]; break; }
-  push(def || list[0]);
-  for (i = 0; i < list.length; i++) if (/дубляж/i.test(list[i].name) && !/украин/i.test(list[i].name)) { push(list[i]); break; }
-  for (i = 0; i < list.length; i++) if (list[i].id === '238' || /оригинал/i.test(list[i].name)) { push(list[i]); break; }
-  return chosen;
-}
-
-function randomFavs() {
-  var hex = '0123456789abcdef', s = '';
-  for (var i = 0; i < 32; i++) s += hex.charAt(Math.floor(Math.random() * 16));
-  return s.slice(0, 8) + '-' + s.slice(8, 12) + '-' + s.slice(12, 16) + '-' + s.slice(16, 20) + '-' + s.slice(20);
-}
-
-function getTranslatorStreams(base, page, tr, season, episode) {
-  var body = page.isSeries
-    ? { id: page.id, translator_id: tr.id, season: season, episode: episode, favs: page.favs || randomFavs(), action: 'get_stream' }
-    : { id: page.id, translator_id: tr.id, is_camrip: tr.camrip, is_ads: tr.ads, is_director: tr.director, favs: page.favs || randomFavs(), action: 'get_movie' };
-  return fetchText(base + '/ajax/get_cdn_series/?t=' + Date.now(), {
-    method: 'POST', headers: ajaxHeaders(base), body: formBody(body)
-  }).then(function (txt) {
-    var json;
-    try { json = JSON.parse(txt); } catch (e) { throw new Error('ответ не JSON'); }
-    if (!json.success || !json.url) {
-      log(tr.name + ': ' + (json.message || 'нет ссылок'));
-      return [];
-    }
-    return parseQualities(decodeStreamString(json.url)).map(function (q) {
-      return {
-        name: 'HDRezka',
-        title: tr.name + ' · ' + q.label,
-        url: q.url,
-        quality: q.height ? q.height + 'p' : q.label,
-        height: q.height,
-        type: 'direct',
-        provider: 'hdrezka',
-        headers: { 'User-Agent': UA, 'Referer': base + '/' }
-      };
-    });
-  }).catch(function (e) {
-    log(tr.name + ': ' + e.message);
-    return [];
+    for (var k = 0; k < Math.min(limit, items.length); k++) run();
   });
 }
 
 // ---------- точка входа ----------
 function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
   mediaType = mediaType === 'tv' ? 'tv' : 'movie';
-  var base, info;
-  return resolveBase().then(function (b) {
-    base = b;
-    return getTmdbInfo(tmdbId, mediaType);
-  }).then(function (i) {
+  var season = mediaType === 'tv' ? (parseInt(seasonNum, 10) || 1) : 1;
+  var episode = mediaType === 'tv' ? (parseInt(episodeNum, 10) || 1) : 1;
+  var info;
+  LOGS = [];
+  log('v1.2.0-debug tmdb=' + tmdbId + ' ' + mediaType + ' S' + season + 'E' + episode);
+  return getTmdbInfo(tmdbId, mediaType, season).then(function (i) {
     info = i;
-    log('TMDB: ' + info.titles.join(' / ') + ' (' + info.year + ')');
+    log('TMDB: ' + info.titles.join(' / ') + ' (' + info.year + '), сезон ' + season + ' (' + info.seasonYear + ')');
     if (!info.titles.length) throw new Error('TMDB не вернул название');
-    return findItem(base, info, mediaType);
-  }).then(function (item) {
-    if (!item) throw new Error('не найдено на сайте');
-    log('Найдено: ' + item.title + ' ' + item.url);
-    return fetchText(item.url, { headers: pageHeaders(base) });
-  }).then(function (html) {
-    var page = parseItemPage(html);
-    if (!page.id) throw new Error('не удалось прочитать id на странице');
-    var trs = chooseTranslators(page);
-    log('Озвучки: ' + trs.map(function (t) { return t.name + '#' + t.id; }).join(', '));
-    return Promise.all(trs.map(function (t) {
-      return getTranslatorStreams(base, page, t, seasonNum || 1, episodeNum || 1);
-    }));
-  }).then(function (groups) {
-    var streams = [], seenUrl = {};
-    groups.forEach(function (g) {
-      g.forEach(function (s) {
-        var key = s.url.replace(/^https?:\/\/[^\/]+\/[^\/]+\/?/, ''); // без хоста и токена
-        if (seenUrl[key]) return;
-        seenUrl[key] = 1;
-        streams.push(s);
-      });
+    return findCandidates(info, mediaType, season);
+  }).then(function (res) {
+    var cands = res.ranked;
+    if (!cands.length) throw new Error('не найдено на сайте');
+    // Варианты: лучший кандидат; сквозной номер (если на сайте сезоны слиты); следующие кандидаты.
+    var tries = [];
+    var mainNorm = norm(info.titles[0]);
+    cands.slice(0, 3).forEach(function (c) {
+      var absEp = info.prevEpisodes + episode;
+      if (mediaType === 'tv' && season > 1 && info.prevEpisodes) {
+        // Длинные сериалы (Наруто, Ван-Пис...) на сайте — одна запись со сквозной нумерацией,
+        // а в TMDB разбиты на сезоны. Если запись началась раньше этого сезона или это
+        // основная запись сериала — сначала пробуем сквозной номер.
+        var sameEntry = (c.year && info.seasonYear && c.year < info.seasonYear) || norm(c.title) === mainNorm;
+        if (sameEntry) {
+          tries.push({ item: c, ep: absEp });
+          tries.push({ item: c, ep: episode });
+        } else {
+          tries.push({ item: c, ep: episode });
+          tries.push({ item: c, ep: absEp });
+        }
+      } else {
+        tries.push({ item: c, ep: episode });
+      }
     });
-    streams.sort(function (a, b) { return b.height - a.height; });
+    var idx = 0;
+    function next() {
+      if (idx >= tries.length) return Promise.resolve(null);
+      var t = tries[idx++];
+      var chain = mediaType === 'tv' ? franchiseChain(res.all, t.item) : [t.item];
+      return walkChain(chain, chain.indexOf(t.item), t.ep).then(function (picked) {
+        return picked || next();
+      });
+    }
+    return next();
+  }).then(function (picked) {
+    if (!picked) throw new Error('серия не найдена');
+    log('Озвучки: ' + picked.map(function (v) { return v.data && v.data.dubbing; }).join(', '));
+    return mapLimit(picked, CONCURRENCY, function (v) { return isAksor(v) ? aksorStreams(v) : kodikStreams(v); });
+  }).then(function (groups) {
+    var streams = [];
+    groups.forEach(function (g) {
+      g.sort(function (a, b) { return b.height - a.height; });
+      streams = streams.concat(g);
+    });
     streams.forEach(function (s) { delete s.height; });
     log('Стримов: ' + streams.length);
-    return streams;
+    return streams.concat(debugStreams());
   }).catch(function (e) {
     log('Ошибка: ' + e.message);
-    return [];
+    return debugStreams();
   });
 }
 
