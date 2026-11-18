@@ -1,0 +1,32 @@
+{
+  "name": "RU Providers",
+  "version": "1.0.0",
+  "scrapers": [
+    {
+      "id": "hdrezka",
+      "name": "HDRezka",
+      "description": "Фильмы и сериалы с rezka.ag, русская озвучка",
+      "version": "1.1.0",
+      "author": "me",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/hdrezka.js",
+      "enabled": true,
+      "formats": ["mp4"],
+      "logo": "https://rezka.ag/favicon.ico",
+      "contentLanguage": ["ru"]
+    },
+    {
+      "id": "yummyanime",
+      "name": "YummyAnime",
+      "description": "Аниме с old.yummyani.me (плеер Kodik), русская озвучка и субтитры",
+      "version": "1.0.0",
+      "author": "me",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/yummyanime.js",
+      "enabled": true,
+      "formats": ["m3u8"],
+      "logo": "https://old.yummyani.me/favicon.ico",
+      "contentLanguage": ["ru"]
+    }
+  ]
+}
