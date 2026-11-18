@@ -19,12 +19,12 @@
       "id": "yummyanime",
       "name": "YummyAnime",
       "description": "Аниме с old.yummyani.me (плеер Kodik), русская озвучка и субтитры",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": "me",
       "supportedTypes": ["movie", "tv"],
       "filename": "providers/yummyanime.js",
       "enabled": true,
-      "formats": ["m3u8"],
+      "formats": ["m3u8", "mpd"],
       "logo": "https://old.yummyani.me/favicon.ico",
       "contentLanguage": ["ru"]
     }
