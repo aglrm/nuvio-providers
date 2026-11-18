@@ -9,6 +9,7 @@ var SITE = 'https://old.yummyani.me';
 var UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 var MAX_DUBS = 40;      // по сути все озвучки серии
 var CONCURRENCY = 5;    // сколько запросов к плеерам одновременно
+var USE_MP4 = true;     // Kodik: отдавать прямой MP4 вместо HLS (false — вернуть HLS)
 // порядок озвучек в списке: эти идут первыми, остальные — после них (это НЕ фильтр)
 var DUB_PRIORITY = ['anilibria', 'anidub', 'studioband', 'dream cast', 'anistar', 'animevost', 'jam', 'shiza', 'crunchyroll', 'субтитры'];
 
@@ -400,6 +401,9 @@ function kodikStreams(video) {
       best = url; bestH = h;
     });
     if (!best) { log(dubName + ': links пустые ' + JSON.stringify(j).slice(0, 80)); return []; }
+    // Тот же файл без HLS-обёртки — обычный MP4 с перемоткой; плееру Nuvio на iOS он даётся надёжнее HLS Kodik
+    var mp4 = best.replace(/:hls:manifest\.m3u8$/, '');
+    if (USE_MP4 && /\.mp4$/.test(mp4)) best = mp4;
     log(dubName + ': OK ' + bestH + 'p');
     return [{
       name: 'YummyAnime · ' + dubName,
@@ -512,7 +516,7 @@ function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
   var episode = mediaType === 'tv' ? (parseInt(episodeNum, 10) || 1) : 1;
   var info;
   LOGS = [];
-  log('v1.3.2 tmdb=' + tmdbId + ' ' + mediaType + ' S' + season + 'E' + episode);
+  log('v1.4.0 tmdb=' + tmdbId + ' ' + mediaType + ' S' + season + 'E' + episode);
   return getTmdbInfo(tmdbId, mediaType, season).then(function (i) {
     info = i;
     log('TMDB: ' + info.titles.join(' / ') + ' (' + info.year + '), сезон ' + season + ' (' + info.seasonYear + ')');
