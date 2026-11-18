@@ -12,7 +12,7 @@ var CONCURRENCY = 5;    // сколько запросов к плеерам о�
 // порядок озвучек в списке: эти идут первыми, остальные — после них (это НЕ фильтр)
 var DUB_PRIORITY = ['anilibria', 'anidub', 'studioband', 'dream cast', 'anistar', 'animevost', 'jam', 'shiza', 'crunchyroll', 'субтитры'];
 
-var DEBUG = false; // true — показывать лог строками DEBUG в списке стримов (для поиска ошибок)
+var DEBUG = true; // true — показывать лог строками DEBUG в списке стримов (для поиска ошибок)
 var LOGS = [];
 function log(msg) {
   LOGS.push(String(msg));
@@ -389,11 +389,14 @@ function kodikStreams(video) {
     var best = null, bestH = -1;
     Object.keys(links).forEach(function (q) {
       var arr = links[q] || [];
-      var h = parseInt(q, 10);
-      if (!arr.length || isNaN(h) || h <= bestH) return;
+      if (!arr.length) return;
       var url = decodeKodikSrc(arr[0].src);
       if (!url) return;
       if (url.indexOf('//') === 0) url = 'https:' + url;
+      // Kodik подписывает 480p как «720», если 720p нет: настоящее качество — в имени файла (/480.mp4:hls...)
+      var real = parseInt((url.match(/\/(\d{3,4})\.mp4/) || [])[1], 10);
+      var h = !isNaN(real) ? real : parseInt(q, 10);
+      if (isNaN(h) || h <= bestH) return;
       best = url; bestH = h;
     });
     if (!best) { log(dubName + ': links пустые ' + JSON.stringify(j).slice(0, 80)); return []; }
@@ -420,8 +423,9 @@ function kodikAllDubs(sample, ep, isMovie) {
   if (iframe.indexOf('//') === 0) iframe = 'https:' + iframe;
   var host = (iframe.match(/^(https?:\/\/[^\/]+)/) || [])[1];
   var url = iframe.split('?')[0] + '?translations=true&only_episode=false&only_season=false' + (isMovie ? '' : '&episode=' + ep);
-  return fetchText(url, { headers: { 'User-Agent': UA, 'Referer': SITE + '/', 'Accept': 'text/html,*/*' } }).then(function (html) {
+  return fetchText(url, { headers: { 'User-Agent': UA, 'Referer': iframe, 'Accept': 'text/html,*/*' } }).then(function (html) {
     var out = [], seen = {};
+    if (html.indexOf('data-media-hash') === -1) log('Kodik: в ответе нет списка озвучек, len=' + html.length);
     var re = /<option([^>]*data-media-hash="[^"]+"[^>]*)>([^<]*)</g, m;
     while ((m = re.exec(html)) !== null) {
       var a = m[1];
@@ -508,7 +512,7 @@ function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
   var episode = mediaType === 'tv' ? (parseInt(episodeNum, 10) || 1) : 1;
   var info;
   LOGS = [];
-  log('v1.3.0 tmdb=' + tmdbId + ' ' + mediaType + ' S' + season + 'E' + episode);
+  log('v1.3.1 tmdb=' + tmdbId + ' ' + mediaType + ' S' + season + 'E' + episode);
   return getTmdbInfo(tmdbId, mediaType, season).then(function (i) {
     info = i;
     log('TMDB: ' + info.titles.join(' / ') + ' (' + info.year + '), сезон ' + season + ' (' + info.seasonYear + ')');
