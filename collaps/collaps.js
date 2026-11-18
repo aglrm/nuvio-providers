@@ -209,10 +209,7 @@ function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
       if (hlsV && hlsV.height) {
         vs = vs.filter(function (v) { return v.kind !== 'DASH' || !v.height || v.height > hlsV.height; });
       }
-      // в плеере дорожки подписаны ru0, ru1, … (номер с нуля) — нумеруем озвучки так же, чтобы их было легко сопоставить
-      var dubLine = dubs.length
-        ? dubs.map(function (d, i) { return i + ' ' + d; }).join(' · ')
-        : 'Collaps';
+      var dubLine = dubs.length ? dubs.join(' · ') : 'Collaps';
       return vs.map(function (v) {
         var q = qualityLabel(v.height) || (v.kind === 'DASH' ? '1080p' : '720p');
         var s = {
