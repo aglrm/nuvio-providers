@@ -236,8 +236,18 @@ function dubRank(name) {
   return DUB_PRIORITY.length;
 }
 
+function isAksor(v) {
+  return /aksor\.tv\/video\//i.test(v.iframe_url || '');
+}
+
 function pickEpisodeVideos(videos, episodeNum) {
   var ep = String(episodeNum);
+  var aksor = videos.filter(function (v) { return isAksor(v) && String(v.number) === ep; });
+  var kodik = pickKodikVideos(videos, ep);
+  return aksor.concat(kodik);
+}
+
+function pickKodikVideos(videos, ep) {
   var list = videos.filter(function (v) { return isKodik(v) && String(v.number) === ep; });
   var byDub = {};
   list.forEach(function (v) {
@@ -288,28 +298,61 @@ function kodikStreams(video) {
       body: formBody(body)
     });
   }).then(function (j) {
-    var out = [];
+    // Одна ссылка на озвучку — в лучшем качестве (плейлист Kodik сам по себе одного качества)
     var links = j.links || {};
+    var best = null, bestH = -1;
     Object.keys(links).forEach(function (q) {
       var arr = links[q] || [];
-      if (!arr.length) return;
+      var h = parseInt(q, 10);
+      if (!arr.length || isNaN(h) || h <= bestH) return;
       var url = decodeKodikSrc(arr[0].src);
       if (!url) return;
       if (url.indexOf('//') === 0) url = 'https:' + url;
-      var h = parseInt(q, 10);
-      out.push({
-        name: 'YummyAnime',
-        title: dubName + ' · ' + q + 'p',
-        url: url,
-        quality: (isNaN(h) ? q : h) + 'p',
-        height: isNaN(h) ? 0 : h,
-        provider: 'yummyanime',
-        headers: { 'User-Agent': UA, 'Referer': host + '/' }
-      });
+      best = url; bestH = h;
     });
-    return out;
+    if (!best) return [];
+    return [{
+      name: 'YummyAnime · ' + dubName,
+      title: dubName + ' · ' + bestH + 'p',
+      url: best,
+      quality: bestH + 'p',
+      height: bestH,
+      provider: 'yummyanime',
+      headers: { 'User-Agent': UA, 'Referer': host + '/' }
+    }];
   }).catch(function (e) {
     log(dubName + ': ' + e.message);
+    return [];
+  });
+}
+
+// ---------- Aksor (до 1080p, формат DASH .mpd) ----------
+function aksorStreams(video) {
+  var id = (String(video.iframe_url).match(/aksor\.tv\/video\/([a-z0-9]+)/i) || [])[1];
+  var dubName = String((video.data && video.data.dubbing) || 'Aksor').replace(/^Озвучка\s+/i, '');
+  if (!id) return Promise.resolve([]);
+  return fetchJson('https://player.aksor.tv/api/video/' + id, {
+    headers: { 'User-Agent': UA, 'Accept': 'application/json', 'Referer': 'https://player.aksor.tv/video/' + id }
+  }).then(function (j) {
+    var q = j.qualities || {};
+    var order = [['q4k', 2160], ['q2k', 1440], ['q1080', 1080], ['q720', 720], ['q480', 480], ['q360', 360]];
+    for (var i = 0; i < order.length; i++) {
+      var url = q[order[i][0]];
+      if (url) {
+        return [{
+          name: 'YummyAnime · ' + dubName + ' (Aksor)',
+          title: dubName + ' · ' + order[i][1] + 'p · Aksor',
+          url: url,
+          quality: order[i][1] + 'p',
+          height: order[i][1],
+          provider: 'yummyanime',
+          headers: { 'User-Agent': UA, 'Referer': 'https://player.aksor.tv/' }
+        }];
+      }
+    }
+    return [];
+  }).catch(function (e) {
+    log('Aksor ' + dubName + ': ' + e.message);
     return [];
   });
 }
@@ -347,7 +390,7 @@ function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
   }).then(function (picked) {
     if (!picked) throw new Error('серия не найдена');
     log('Озвучки: ' + picked.map(function (v) { return v.data && v.data.dubbing; }).join(', '));
-    return Promise.all(picked.map(kodikStreams));
+    return Promise.all(picked.map(function (v) { return isAksor(v) ? aksorStreams(v) : kodikStreams(v); }));
   }).then(function (groups) {
     var streams = [];
     groups.forEach(function (g) {
