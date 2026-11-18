@@ -1,12 +1,12 @@
 {
   "name": "HDRezka",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "scrapers": [
     {
       "id": "hdrezka",
       "name": "HDRezka",
       "description": "Фильмы и сериалы с rezka.ag: несколько озвучек, оригинал с субтитрами, до 1080p",
-      "version": "2.0.0",
+      "version": "2.1.0",
       "author": "me",
       "supportedTypes": [
         "movie",
