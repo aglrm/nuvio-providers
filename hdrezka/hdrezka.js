@@ -19,9 +19,11 @@ var INCLUDE_ORIGINAL = true; // добавлять «Оригинал (+субт
 // порядок озвучек: эти идут сразу после озвучки, выбранной на сайте (это НЕ фильтр)
 var TRANSLATOR_PRIORITY = ['дубляж', 'hdrezka studio', 'lostfilm', 'лостфильм', 'tvshows', 'кубик', 'kubik', 'amedia', 'амедиа', 'newstudio', 'jaskier', 'яскъер', 'red head sound', 'кураж', 'гоблин'];
 
-var DEBUG = false; // true — показывать лог строками DEBUG в списке стримов (для поиска ошибок)
+var DEBUG = true; // ОТЛАДОЧНАЯ ВЕРСИЯ
+var T0 = Date.now(); // true — показывать лог строками DEBUG в списке стримов (для поиска ошибок)
 var LOGS = [];
 function log(msg) {
+  msg = '[' + (Date.now() - T0) + 'ms] ' + msg;
   LOGS.push(String(msg));
   try { console.log('[HDRezka] ' + msg); } catch (e) {}
 }
@@ -223,16 +225,31 @@ function anubisOpts(opts) {
 // fetch, который сам проходит Anubis. Возвращает { status, text }.
 // Важно: в opts.headers должен быть тот же User-Agent, что и во всех остальных запросах.
 function anubisFetchText(url, opts, _retried) {
-  return fetch(url, anubisOpts(opts)).then(function (r) {
+  return anubisFetchTextInner(url, opts, _retried).catch(function (e) {
+    log('fetch ОШИБКА ' + url.replace(/^https?:\/\/[^\/]+/, '').slice(0, 50) + ': ' + e.message);
+    throw e;
+  });
+}
+
+function anubisFetchTextInner(url, opts, _retried) {
+  var ao = anubisOpts(opts);
+  return fetch(url, ao).then(function (r) {
+    var sc = null;
+    try { sc = r.headers && r.headers.get && r.headers.get('set-cookie'); } catch (e) { sc = 'ERR ' + e.message; }
     anubisRememberCookies(r);
     return r.text().then(function (text) {
       var ch = anubisParse(text);
+      log('fetch ' + url.replace(/^https?:\/\/[^\/]+/, '').slice(0, 50) + (_retried ? ' (повтор)' : '') + ' → ' + r.status +
+        ', ' + text.length + 'б' + (ch ? ', ПРОВЕРКА ANUBIS' : '') +
+        ', set-cookie: ' + (sc ? String(sc).split(/[;,]/).filter(function (p) { return /=/.test(p) && !/path|expires|max-age|domain|samesite/i.test(p); }).map(function (p) { return p.split('=')[0].trim(); }).join('|') : 'не виден') +
+        ', отправил Cookie: ' + (ao.headers.Cookie ? Object.keys(ANUBIS_COOKIES).join('|') : 'нет'));
       if (!ch) return { status: r.status, text: text };
       if (_retried) throw new Error('anubis: проверка не пройдена (cookie не сохранилась?)');
       if (ch.algorithm !== 'fast' && ch.algorithm !== 'slow') {
         throw new Error('anubis: неизвестный алгоритм ' + ch.algorithm);
       }
       var sol = anubisSolve(ch.randomData, ch.difficulty);
+      log('anubis: сложность ' + ch.difficulty + ', nonce ' + sol.nonce + ', ' + sol.elapsed + 'мс');
       var origin = url.match(/^https?:\/\/[^\/]+/)[0];
       var redir = url.slice(origin.length) || '/';
       var passUrl = origin + ch.basePrefix + '/.within.website/x/cmd/anubis/api/pass-challenge' +
@@ -252,9 +269,12 @@ function anubisFetchText(url, opts, _retried) {
       // redirect: 'manual' — чтобы увидеть Set-Cookie из 302, где это поддерживается;
       // если fetch всё равно идёт по редиректу, cookie сохранит нативный cookie-jar.
       return fetch(passUrl, anubisOpts({ headers: passHeaders, redirect: 'manual' })).then(function (pr) {
+        var psc = null;
+        try { psc = pr.headers && pr.headers.get && pr.headers.get('set-cookie'); } catch (e) { psc = 'ERR'; }
+        log('pass-challenge → ' + pr.status + ' ' + (pr.type || '') + ' url=' + String(pr.url || '').replace(/^https?:\/\/[^\/]+/, '').slice(0, 40) + ', set-cookie: ' + (psc ? 'виден' : 'не виден'));
         anubisRememberCookies(pr);
         return pr.text();
-      }).then(function () {
+      }, function (e) { log('pass-challenge ОШИБКА fetch: ' + e.message); }).then(function () {
         return anubisFetchText(url, opts, true); // повторяем исходный запрос уже с cookie
       });
     });
@@ -658,6 +678,8 @@ function isPremiumWall(html) {
 // ---------- точка входа ----------
 function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
   LOGS = [];
+  T0 = Date.now();
+  log('старт ' + mediaType + ' ' + tmdbId + ' S' + seasonNum + 'E' + episodeNum);
   mediaType = mediaType === 'tv' ? 'tv' : 'movie';
   var season = seasonNum || 1, episode = episodeNum || 1;
   var base, info;
