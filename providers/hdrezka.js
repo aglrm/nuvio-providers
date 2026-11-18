@@ -1,6 +1,6 @@
 // YummyAnime (old.yummyani.me) scraper for Nuvio
 // - поиск через API сайта: /api/search, серии: /api/anime/{id}/videos
-// - видео берётся из плеера Kodik (у него больше всего озвучек), ссылки расшифровываются
+// - видео: Kodik (все озвучки берутся у самого Kodik) и Aksor (до 1080p, DASH)
 // - сезон TMDB сопоставляется с отдельной записью на сайте по году выхода сезона
 // Только Promise-цепочки, без async/await (требование Nuvio).
 
@@ -9,10 +9,11 @@ var SITE = 'https://old.yummyani.me';
 var UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 var MAX_DUBS = 40;      // по сути все озвучки серии
 var CONCURRENCY = 5;    // сколько запросов к плеерам одновременно
+var USE_MP4 = true;     // Kodik: отдавать прямой MP4 вместо HLS (false — вернуть HLS)
 // порядок озвучек в списке: эти идут первыми, остальные — после них (это НЕ фильтр)
 var DUB_PRIORITY = ['anilibria', 'anidub', 'studioband', 'dream cast', 'anistar', 'animevost', 'jam', 'shiza', 'crunchyroll', 'субтитры'];
 
-var DEBUG = true; // ОТЛАДКА: показывает лог строками в списке стримов
+var DEBUG = false; // true — показывать лог строками DEBUG в списке стримов (для поиска ошибок)
 var LOGS = [];
 function log(msg) {
   LOGS.push(String(msg));
@@ -143,9 +144,10 @@ function rankCandidates(all, info, mediaType, season) {
   var targetYear = mediaType === 'tv' ? (info.seasonYear || info.year) : info.year;
   var scored = [];
   all.forEach(function (it) {
+    var alias = it.type && it.type.alias;
     var movie = isMovieType(it);
     if (mediaType === 'movie' && !movie) return;
-    if (mediaType === 'tv' && movie) return;
+    if (mediaType === 'tv' && alias !== 'tv' && alias !== 'ona') return; // спешлы, OVA, фильмы — мимо
     var t = norm(it.title);
     var score = 0;
     if (t === mainTitle) score += 4;
@@ -224,15 +226,27 @@ function walkChain(chain, idx, ep, isNextPart) {
     log('videos id=' + item.anime_id + ': ' + videos.length);
     if (isNextPart && isShorts(videos)) return walkChain(chain, idx + 1, ep, true);
     var picked = pickEpisodeVideos(videos, ep);
+    var onlySample = picked.length && picked.every(function (v) { return v.sampleOnly; });
+    if (onlySample) {
+      // список обрезан и серии в нём нет: проверяем по карточке аниме, есть ли такая серия вообще
+      return getEpisodeCount(item.anime_id).then(function (cnt) {
+        if (cnt && ep > cnt && idx + 1 < chain.length) return walkChain(chain, idx + 1, ep - cnt, true);
+        log('Найдено (по образцу Kodik): ' + item.title + ' id=' + item.anime_id + ', серия ' + ep);
+        picked.ep = ep;
+        return picked;
+      });
+    }
     if (picked.length) {
       log('Найдено: ' + item.title + ' (' + item.year + ') id=' + item.anime_id + ', серия ' + ep);
+      picked.ep = ep; // номер серии внутри найденной записи
       return picked;
     }
-    var max = maxEpisode(videos);
-    if (max > 0 && ep > max && idx + 1 < chain.length) {
-      return walkChain(chain, idx + 1, ep - max, true);
-    }
-    return null;
+    if (idx + 1 >= chain.length) return null;
+    return getEpisodeCount(item.anime_id).then(function (cnt) {
+      var max = Math.max(maxEpisode(videos), cnt);
+      if (max > 0 && ep > max) return walkChain(chain, idx + 1, ep - max, true);
+      return null;
+    });
   }).catch(function (e) {
     log('videos: ' + e.message);
     return null;
@@ -241,9 +255,55 @@ function walkChain(chain, idx, ep, isNextPart) {
 
 // ---------- серии и озвучки ----------
 function getVideos(animeId) {
-  return fetchJson(SITE + '/api/anime/' + animeId + '/videos', {
+  return fetch(SITE + '/api/anime/' + animeId + '/videos', {
     headers: { 'User-Agent': UA, 'Accept': 'application/json', 'Referer': SITE + '/' }
-  }).then(function (j) { return j.response || []; });
+  }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.text();
+  }).then(function (t) {
+    try {
+      return JSON.parse(t).response || [];
+    } catch (e) {
+      // У длинных сериалов (Наруто — 2 МБ) ответ может прийти обрезанным: читаем то, что пришло
+      var list = parseVideosLoose(t);
+      list.truncated = true;
+      log('videos id=' + animeId + ': ответ обрезан (' + t.length + ' байт), прочитано ' + list.length);
+      return list;
+    }
+  });
+}
+
+function unesc(s) {
+  try { return JSON.parse('"' + s + '"'); } catch (e) { return String(s).replace(/\\\//g, '/'); }
+}
+
+function parseVideosLoose(t) {
+  var parts = String(t).split('{"video_id":'), out = [];
+  for (var i = 1; i < parts.length; i++) {
+    var c = parts[i];
+    var iframe = (c.match(/"iframe_url":"((?:[^"\\]|\\.)*)"/) || [])[1];
+    if (!iframe) continue; // последний, недокачанный кусок
+    out.push({
+      iframe_url: unesc(iframe),
+      number: (c.match(/"number":"([^"]*)"/) || [])[1],
+      duration: parseInt((c.match(/"duration":(\d+)/) || [])[1] || '0', 10),
+      data: {
+        player: unesc((c.match(/"player":"((?:[^"\\]|\\.)*)"/) || [])[1] || ''),
+        dubbing: unesc((c.match(/"dubbing":"((?:[^"\\]|\\.)*)"/) || [])[1] || '')
+      }
+    });
+  }
+  return out;
+}
+
+// Сколько серий в записи по данным сайта (маленький запрос, на случай обрезанного списка видео)
+function getEpisodeCount(animeId) {
+  return fetchJson(SITE + '/api/anime/' + animeId, {
+    headers: { 'User-Agent': UA, 'Accept': 'application/json', 'Referer': SITE + '/' }
+  }).then(function (j) {
+    var e = (j.response && j.response.episodes) || {};
+    return Math.max(e.aired || 0, e.count || 0);
+  }).catch(function () { return 0; });
 }
 
 function isKodik(v) {
@@ -264,6 +324,13 @@ function pickEpisodeVideos(videos, episodeNum) {
   var ep = String(episodeNum);
   var aksor = videos.filter(function (v) { return isAksor(v) && String(v.number) === ep; });
   var kodik = pickKodikVideos(videos, ep);
+  if (!kodik.length) {
+    // серии нет среди прочитанного — подойдёт любая ссылка Kodik этой записи,
+    // список озвучек и нужную серию дальше возьмём у самого Kodik
+    var any = null;
+    for (var i = 0; i < videos.length; i++) if (isKodik(videos[i])) { any = videos[i]; break; }
+    if (any && videos.truncated) kodik = [{ iframe_url: any.iframe_url, data: any.data, number: any.number, sampleOnly: true }];
+  }
   return aksor.concat(kodik);
 }
 
@@ -323,14 +390,20 @@ function kodikStreams(video) {
     var best = null, bestH = -1;
     Object.keys(links).forEach(function (q) {
       var arr = links[q] || [];
-      var h = parseInt(q, 10);
-      if (!arr.length || isNaN(h) || h <= bestH) return;
+      if (!arr.length) return;
       var url = decodeKodikSrc(arr[0].src);
       if (!url) return;
       if (url.indexOf('//') === 0) url = 'https:' + url;
+      // Kodik подписывает 480p как «720», если 720p нет: настоящее качество — в имени файла (/480.mp4:hls...)
+      var real = parseInt((url.match(/\/(\d{3,4})\.mp4/) || [])[1], 10);
+      var h = !isNaN(real) ? real : parseInt(q, 10);
+      if (isNaN(h) || h <= bestH) return;
       best = url; bestH = h;
     });
     if (!best) { log(dubName + ': links пустые ' + JSON.stringify(j).slice(0, 80)); return []; }
+    // Тот же файл без HLS-обёртки — обычный MP4 с перемоткой; плееру Nuvio на iOS он даётся надёжнее HLS Kodik
+    var mp4 = best.replace(/:hls:manifest\.m3u8$/, '');
+    if (USE_MP4 && /\.mp4$/.test(mp4)) best = mp4;
     log(dubName + ': OK ' + bestH + 'p');
     return [{
       name: 'YummyAnime · ' + dubName,
@@ -343,6 +416,45 @@ function kodikStreams(video) {
     }];
   }).catch(function (e) {
     log(dubName + ': ' + e.message);
+    return [];
+  });
+}
+
+// Kodik сам отдаёт все свои озвучки сериала, если открыть плеер с translations=true.
+// sample — любая ссылка Kodik этой записи. Возвращает видео-объекты для нужной серии.
+function kodikAllDubs(sample, ep, isMovie) {
+  var iframe = sample.iframe_url;
+  if (iframe.indexOf('//') === 0) iframe = 'https:' + iframe;
+  var host = (iframe.match(/^(https?:\/\/[^\/]+)/) || [])[1];
+  var url = iframe.split('?')[0] + '?translations=true&only_episode=false&only_season=false' + (isMovie ? '' : '&episode=' + ep);
+  return fetchText(url, { headers: { 'User-Agent': UA, 'Referer': iframe, 'Accept': 'text/html,*/*' } }).then(function (html) {
+    var out = [], seen = {};
+    if (html.indexOf('data-media-hash') === -1) log('Kodik: в ответе нет списка озвучек, len=' + html.length);
+    var re = /<option([^>]*data-media-hash="[^"]+"[^>]*)>([^<]*)</g, m;
+    while ((m = re.exec(html)) !== null) {
+      var a = m[1];
+      var get = function (n) { return (a.match(new RegExp('data-' + n + '="([^"]*)"')) || [])[1] || ''; };
+      var mType = get('media-type'), mId = get('media-id'), mHash = get('media-hash');
+      if (!mType || !mId || !mHash || seen[mType + mId]) continue;
+      seen[mType + mId] = 1;
+      if (!isMovie) {
+        var cnt = get('episode-count'), lo = 1, hi = 100000, r;
+        if ((r = cnt.match(/(\d+)\s*[~\-]\s*(\d+)/))) { lo = +r[1]; hi = +r[2]; }
+        else if ((r = cnt.match(/(\d+)/))) { hi = +r[1]; }
+        if (ep < lo || ep > hi) continue; // у этой озвучки нет такой серии
+      }
+      var title = get('title') || m[2].replace(/\(.*$/, '').trim();
+      if (get('translation-type') === 'subtitles' && !/субтитр/i.test(title)) title = 'Субтитры ' + title;
+      out.push({
+        iframe_url: host + '/' + mType + '/' + mId + '/' + mHash + '/720p?translations=false&only_episode=true&only_season=true' + (isMovie ? '' : '&episode=' + ep),
+        data: { player: 'Плеер Kodik', dubbing: title }
+      });
+    }
+    out.sort(function (x, y) { return dubRank(x.data.dubbing) - dubRank(y.data.dubbing); });
+    log('Kodik: озвучек ' + out.length + ' для серии ' + ep);
+    return out.slice(0, MAX_DUBS);
+  }).catch(function (e) {
+    log('Kodik список озвучек: ' + e.message);
     return [];
   });
 }
@@ -404,7 +516,7 @@ function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
   var episode = mediaType === 'tv' ? (parseInt(episodeNum, 10) || 1) : 1;
   var info;
   LOGS = [];
-  log('v1.2.0-debug tmdb=' + tmdbId + ' ' + mediaType + ' S' + season + 'E' + episode);
+  log('v1.4.0 tmdb=' + tmdbId + ' ' + mediaType + ' S' + season + 'E' + episode);
   return getTmdbInfo(tmdbId, mediaType, season).then(function (i) {
     info = i;
     log('TMDB: ' + info.titles.join(' / ') + ' (' + info.year + '), сезон ' + season + ' (' + info.seasonYear + ')');
@@ -446,6 +558,16 @@ function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
     return next();
   }).then(function (picked) {
     if (!picked) throw new Error('серия не найдена');
+    var aksor = picked.filter(isAksor);
+    var kodik = picked.filter(function (v) { return !isAksor(v); });
+    var epNum = mediaType === 'tv' ? picked.ep : 1;
+    var expand = kodik.length ? kodikAllDubs(kodik[0], epNum, mediaType === 'movie') : Promise.resolve([]);
+    return expand.then(function (all) {
+      var list = all.length ? all : kodik.filter(function (v) { return !v.sampleOnly; });
+      return aksor.concat(list);
+    });
+  }).then(function (picked) {
+    if (!picked.length) throw new Error('нет озвучек для этой серии');
     log('Озвучки: ' + picked.map(function (v) { return v.data && v.data.dubbing; }).join(', '));
     return mapLimit(picked, CONCURRENCY, function (v) { return isAksor(v) ? aksorStreams(v) : kodikStreams(v); });
   }).then(function (groups) {
