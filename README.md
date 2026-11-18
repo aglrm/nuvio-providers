@@ -1,17 +1,18 @@
 # Скраперы для Nuvio
 
-Два отдельных плагина с русской озвучкой. Каждый добавляется в Nuvio своей ссылкой и включается/выключается независимо.
+Три отдельных плагина с русской озвучкой. Каждый добавляется в Nuvio своей ссылкой и включается/выключается независимо.
 
 | Плагин | Сайт | Что ищет | Ссылка для Nuvio |
 |---|---|---|---|
 | **HDRezka** | rezka.ag | Фильмы и сериалы, до 1080p | `https://raw.githubusercontent.com/aglrm/nuvio-providers/refs/heads/main/hdrezka/` |
 | **YummyAnime** | old.yummyani.me | Аниме: сериалы и фильмы | `https://raw.githubusercontent.com/aglrm/nuvio-providers/refs/heads/main/yummyanime/` |
+| **Collaps** | балансер Collaps | Фильмы и сериалы, до 1080p | `https://raw.githubusercontent.com/aglrm/nuvio-providers/refs/heads/main/collaps/` |
 
 ## Установка
 
 1. Откройте Nuvio → **Settings → Local Scrapers**.
-2. Добавьте нужную ссылку из таблицы (окончание `/hdrezka/` или `/yummyanime/` обязательно).
-3. Чтобы поставить оба плагина, добавьте обе ссылки.
+2. Добавьте нужную ссылку из таблицы (окончание `/hdrezka/`, `/yummyanime/` или `/collaps/` обязательно).
+3. Чтобы поставить несколько плагинов, добавьте каждую ссылку.
 
 ## Структура
 
@@ -20,6 +21,8 @@ hdrezka/manifest.json      — плагин HDRezka
 hdrezka/hdrezka.js
 yummyanime/manifest.json   — плагин YummyAnime
 yummyanime/yummyanime.js
+collaps/manifest.json      — плагин Collaps
+collaps/collaps.js
 ```
 
 Каждая папка — отдельный репозиторий для Nuvio со своим `manifest.json`. Скраперы написаны на Promise-цепочках без async/await, как того требует Nuvio.
@@ -35,6 +38,14 @@ yummyanime/yummyanime.js
 
 - Ищет аниме через API сайта, видео берёт из плееров Kodik и Aksor.
 - Сезон из TMDB сопоставляет с записью на сайте по году выхода; продолжения, которые в TMDB входят в тот же сезон, находит сам.
+
+## Collaps
+
+- Ищет сразу по IMDb ID из TMDB, без поиска по названию, поэтому быстрый и не путает фильмы с одинаковыми названиями.
+- Все озвучки идут **в одном потоке** как аудиодорожки: озвучку выбирают в плеере в меню аудио. В названии источника озвучки перечислены в том же порядке, в каком идут дорожки (в плеере они могут называться `rus0`, `rus1`, `eng2` …).
+- HLS — до 720p, DASH — до 1080p. DASH показывается, только если он даёт качество выше HLS.
+- Русские и английские субтитры передаются в плеер.
+- Если Collaps переедет, поменяйте `DOMAINS` в начале `collaps/collaps.js`.
 
 ## Если стримов нет
 
