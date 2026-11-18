@@ -10,6 +10,10 @@
 var TMDB_API_KEY = '439c478a771f35c05022f9feabcca01c';
 var DOMAINS = ['https://rezka.ag', 'https://hdrezka.ag', 'https://hdrezka.me'];
 var UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+// User-Agent для запросов к самому сайту. Anubis по стандартным правилам проверяет только
+// браузеры («Mozilla…»), остальных клиентов пропускает. Так парсер честно не выдаёт себя за браузер,
+// а на iOS это единственный рабочий путь: Nuvio там не даёт прочитать cookie из перенаправления.
+var SITE_UA = 'NuvioHDRezka/2.0';
 
 var MAX_TRANSLATORS = 8;   // сколько озвучек запрашивать (оригинал добавляется сверх этого)
 var CONCURRENCY = 3;       // сколько запросов к сайту одновременно
@@ -50,7 +54,7 @@ function assign(a, b) {
 
 function pageHeaders(base) {
   return {
-    'User-Agent': UA,
+    'User-Agent': SITE_UA,
     'Referer': base + '/',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8'
