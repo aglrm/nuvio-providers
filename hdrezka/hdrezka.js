@@ -19,8 +19,8 @@ var INCLUDE_ORIGINAL = true; // добавлять «Оригинал (+субт
 // порядок озвучек: эти идут сразу после озвучки, выбранной на сайте (это НЕ фильтр)
 var TRANSLATOR_PRIORITY = ['дубляж', 'hdrezka studio', 'lostfilm', 'лостфильм', 'tvshows', 'кубик', 'kubik', 'amedia', 'амедиа', 'newstudio', 'jaskier', 'яскъер', 'red head sound', 'кураж', 'гоблин'];
 
-var DEBUG = true; // ОТЛАДОЧНАЯ ВЕРСИЯ
-var T0 = Date.now(); // true — показывать лог строками DEBUG в списке стримов (для поиска ошибок)
+var T0 = Date.now();
+var DEBUG = true; // ОТЛАДОЧНАЯ ВЕРСИЯ — // true — показывать лог строками DEBUG в списке стримов (для поиска ошибок)
 var LOGS = [];
 function log(msg) {
   msg = '[' + (Date.now() - T0) + 'ms] ' + msg;
@@ -101,6 +101,9 @@ function mapLimit(items, limit, fn) {
 // Только Promise-цепочки, без async/await (требование Nuvio).
 
 var ANUBIS_COOKIES = {}; // имя -> значение; cookie из Set-Cookie, если их видно
+// false — cookie хранит сам телефон (iOS/Android), вручную их не подставляем;
+// true — подставляем вручную (включается, только если без этого проверка не прошла)
+var ANUBIS_MANUAL = false;
 
 // --- SHA-256 (чистый JS, на вход строка ASCII/UTF-8, на выход hex) ---
 var SHA256_K = [
@@ -200,7 +203,14 @@ function anubisRememberCookies(resp) {
     sc.split(/,(?=\s*[^;,=\s]+=)/).forEach(function (part) {
       var kv = part.split(';')[0].trim();
       var eq = kv.indexOf('=');
-      if (eq > 0) ANUBIS_COOKIES[kv.slice(0, eq)] = kv.slice(eq + 1);
+      if (eq <= 0) return;
+      var name = kv.slice(0, eq), value = kv.slice(eq + 1);
+      var exp = part.match(/expires=([^;]+)/i);
+      // Anubis стирает cookie пустым значением / Max-Age=0 / датой в прошлом — такие удаляем
+      var deleted = !value || /max-age=\s*(-\d+|0)\b/i.test(part) ||
+        (exp && !isNaN(Date.parse(exp[1])) && Date.parse(exp[1]) < Date.now());
+      if (deleted) delete ANUBIS_COOKIES[name];
+      else ANUBIS_COOKIES[name] = value;
     });
   } catch (e) {}
 }
@@ -216,7 +226,7 @@ function anubisOpts(opts) {
   var h = {};
   var src = opts.headers || {};
   Object.keys(src).forEach(function (k) { h[k] = src[k]; });
-  var ck = anubisCookieHeader();
+  var ck = ANUBIS_MANUAL ? anubisCookieHeader() : '';
   if (ck) h['Cookie'] = h['Cookie'] ? h['Cookie'] + '; ' + ck : ck;
   o.headers = h;
   return o;
@@ -239,12 +249,20 @@ function anubisFetchTextInner(url, opts, _retried) {
     anubisRememberCookies(r);
     return r.text().then(function (text) {
       var ch = anubisParse(text);
-      log('fetch ' + url.replace(/^https?:\/\/[^\/]+/, '').slice(0, 50) + (_retried ? ' (повтор)' : '') + ' → ' + r.status +
+      log('fetch ' + url.replace(/^https?:\/\/[^\/]+/, '').slice(0, 50) + (_retried ? ' (повтор ' + _retried + ')' : '') + ' → ' + r.status +
         ', ' + text.length + 'б' + (ch ? ', ПРОВЕРКА ANUBIS' : '') +
-        ', set-cookie: ' + (sc ? String(sc).split(/[;,]/).filter(function (p) { return /=/.test(p) && !/path|expires|max-age|domain|samesite/i.test(p); }).map(function (p) { return p.split('=')[0].trim(); }).join('|') : 'не виден') +
-        ', отправил Cookie: ' + (ao.headers.Cookie ? Object.keys(ANUBIS_COOKIES).join('|') : 'нет'));
+        ', set-cookie: ' + (sc ? String(sc).split(/,(?=\s*[^;,=\s]+=)/).map(function (p) { var kv = p.split(';')[0].trim(); return kv.split('=')[0].replace('techaro.lol-anubis-', '') + (kv.split('=')[1] ? '' : '(пусто)'); }).join('|') : 'не виден') +
+        ', ручной Cookie: ' + (ao.headers.Cookie ? ao.headers.Cookie.split('; ').map(function (p) { return p.split('=')[0].replace('techaro.lol-anubis-', ''); }).join('|') : 'нет'));
       if (!ch) return { status: r.status, text: text };
-      if (_retried) throw new Error('anubis: проверка не пройдена (cookie не сохранилась?)');
+      _retried = _retried || 0;
+      if (_retried >= 2 || (_retried === 1 && ANUBIS_MANUAL)) {
+        throw new Error('anubis: проверка не пройдена (cookie не сохранилась?)');
+      }
+      if (_retried === 1) {
+        // хранилище телефона cookie не подхватило — пробуем подставлять их вручную
+        ANUBIS_MANUAL = true;
+        try { log('anubis: включаю ручные cookie'); } catch (e) {}
+      }
       if (ch.algorithm !== 'fast' && ch.algorithm !== 'slow') {
         throw new Error('anubis: неизвестный алгоритм ' + ch.algorithm);
       }
@@ -271,11 +289,11 @@ function anubisFetchTextInner(url, opts, _retried) {
       return fetch(passUrl, anubisOpts({ headers: passHeaders, redirect: 'manual' })).then(function (pr) {
         var psc = null;
         try { psc = pr.headers && pr.headers.get && pr.headers.get('set-cookie'); } catch (e) { psc = 'ERR'; }
-        log('pass-challenge → ' + pr.status + ' ' + (pr.type || '') + ' url=' + String(pr.url || '').replace(/^https?:\/\/[^\/]+/, '').slice(0, 40) + ', set-cookie: ' + (psc ? 'виден' : 'не виден'));
+        log('pass-challenge → ' + pr.status + ' url=' + String(pr.url || '').replace(/^https?:\/\/[^\/]+/, '').slice(0, 40) + ', set-cookie: ' + (psc ? 'виден' : 'не виден'));
         anubisRememberCookies(pr);
         return pr.text();
-      }, function (e) { log('pass-challenge ОШИБКА fetch: ' + e.message); }).then(function () {
-        return anubisFetchText(url, opts, true); // повторяем исходный запрос уже с cookie
+      }).then(function () {
+        return anubisFetchText(url, opts, _retried + 1); // повторяем исходный запрос уже с cookie
       });
     });
   });
