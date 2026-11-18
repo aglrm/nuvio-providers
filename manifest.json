@@ -1,0 +1,27 @@
+{
+  "name": "HDRezka",
+  "version": "2.0.0",
+  "scrapers": [
+    {
+      "id": "hdrezka",
+      "name": "HDRezka",
+      "description": "Фильмы и сериалы с rezka.ag: несколько озвучек, оригинал с субтитрами, до 1080p",
+      "version": "2.0.0",
+      "author": "me",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "hdrezka.js",
+      "enabled": true,
+      "formats": [
+        "mp4",
+        "m3u8"
+      ],
+      "logo": "https://rezka.ag/favicon.ico",
+      "contentLanguage": [
+        "ru"
+      ]
+    }
+  ]
+}
